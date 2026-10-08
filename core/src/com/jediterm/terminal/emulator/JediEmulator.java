@@ -1,3 +1,4 @@
+// Modified in 2026 by Sébastien Cabaniols: support REP (CSI Ps b).
 package com.jediterm.terminal.emulator;
 
 import com.jediterm.core.Color;
@@ -14,6 +15,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.text.BreakIterator;
 import java.util.List;
 
 /**
@@ -31,6 +33,8 @@ public class JediEmulator extends DataStreamIteratingEmulator {
   private static int logThrottlerCounter = 0;
   private static final int logThrottlerRatio = 100;
   private static int logThrottlerLimit = logThrottlerRatio;
+
+  private String myLastGraphicText = "";
 
   public JediEmulator(TerminalDataStream dataStream, Terminal terminal) {
     super(dataStream, terminal);
@@ -89,6 +93,9 @@ public class JediEmulator extends DataStreamIteratingEmulator {
           myDataStream.pushChar(ch);
           String nonControlCharacters = readNonControlCharacters(terminal.distanceToLineEnd(), terminal.ambiguousCharsAreDoubleWidth());
 
+          if (!nonControlCharacters.isEmpty()) {
+            myLastGraphicText = nonControlCharacters;
+          }
           terminal.writeCharacters(nonControlCharacters);
         }
         break;
@@ -202,6 +209,7 @@ public class JediEmulator extends DataStreamIteratingEmulator {
         break;
       case 'c': // RIS (Reset to Initial State) https://vt100.net/docs/vt510-rm/RIS.html
         terminal.reset(true);
+        myLastGraphicText = "";
         break;
       case 'n': //Invoke the G2 Character Set as GL - locking shift 2 (LS2)
         myTerminal.mapCharsetToGL(2);
@@ -444,7 +452,7 @@ public class JediEmulator extends DataStreamIteratingEmulator {
     return sb.toString();
   }
 
-  private boolean processControlSequence(ControlSequence args) {
+  private boolean processControlSequence(ControlSequence args) throws IOException {
     switch (args.getFinalChar()) {
       case '@':
         return insertBlankCharacters(args); //ICH
@@ -482,6 +490,8 @@ public class JediEmulator extends DataStreamIteratingEmulator {
         return scrollUp(args);
       case 'T': //SD
         return scrollDown(args);
+      case 'b': //REP
+        return repeatPrecedingCharacter(args);
       case 'c': //Send Device Attributes (Primary DA)
         if (args.startsWithMoreMark()) { //Send Device Attributes (Secondary DA)
           return sendSecondaryDeviceAttributes(args);
@@ -879,6 +889,33 @@ public class JediEmulator extends DataStreamIteratingEmulator {
     final int count = args.getArg(0, 1);
 
     myTerminal.insertBlankCharacters(count);
+
+    return true;
+  }
+
+  /**
+   * Repeat the preceding graphic character, REP, ECMA-48 8.3.103,
+   * <a href="https://invisible-island.net/xterm/ctlseqs/ctlseqs.html">xterm control sequences</a>.
+   * ncurses may emit it for a run of identical characters when the terminfo entry declares `rep`.
+   * The repeats are pushed back into the data stream, so they are processed exactly like the same text
+   * sent by the application: character sets, double width characters, surrogate pairs and line wrapping.
+   */
+  private boolean repeatPrecedingCharacter(ControlSequence args) throws IOException {
+    if (myLastGraphicText.isEmpty()) {
+      return false;
+    }
+    // the count comes from the remote side: 0 or omitted means 1, a negative value (the argument parser
+    // overflows above Integer.MAX_VALUE) is treated the same, and never repeat more than one screenful
+    int maxCount = Math.max(1, myTerminal.getTerminalWidth() * myTerminal.getTerminalHeight());
+    int count = Math.max(1, Math.min(args.getArg(0, 1), maxCount));
+
+    // the preceding graphic character is the last grapheme: a surrogate pair or a base and its combining marks
+    BreakIterator graphemes = BreakIterator.getCharacterInstance();
+    graphemes.setText(myLastGraphicText);
+    String grapheme = myLastGraphicText.substring(graphemes.preceding(myLastGraphicText.length()));
+
+    char[] repeated = grapheme.repeat(count).toCharArray();
+    myDataStream.pushBackBuffer(repeated, repeated.length);
 
     return true;
   }
