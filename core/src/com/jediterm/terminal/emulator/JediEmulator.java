@@ -1,4 +1,5 @@
 // Modified in 2026 by Sébastien Cabaniols: support REP (CSI Ps b).
+// Modified in 2026 by Sébastien Cabaniols: apply every mode of a combined SM/RM or DECSET/DECRST sequence.
 package com.jediterm.terminal.emulator;
 
 import com.jediterm.core.Color;
@@ -618,9 +619,22 @@ public class JediEmulator extends DataStreamIteratingEmulator {
     return true;
   }
 
+  /**
+   * SM/RM and DECSET/DECRST accept several modes in one sequence, applied in order:
+   * ncurses enables SGR mouse reporting with {@code CSI ? 1006 ; 1000 h} when the terminfo entry is xterm-256color.
+   */
   private boolean setModeOrPrivateMode(ControlSequence args, boolean enabled) {
-    if (args.startsWithQuestionMark()) { // DEC Private Mode
-      switch (args.getArg(0, -1)) {
+    boolean allHandled = true;
+    int count = Math.max(1, args.getCount());
+    for (int i = 0; i < count; i++) {
+      allHandled &= applyModeOrPrivateMode(args.startsWithQuestionMark(), args.getArg(i, -1), enabled);
+    }
+    return allHandled;
+  }
+
+  private boolean applyModeOrPrivateMode(boolean privateMode, int mode, boolean enabled) {
+    if (privateMode) { // DEC Private Mode
+      switch (mode) {
         case 1: //Cursor Keys Mode (DECCKM)
           setModeEnabled(TerminalMode.CursorKey, enabled);
           return true;
@@ -740,7 +754,7 @@ public class JediEmulator extends DataStreamIteratingEmulator {
           return false;
       }
     } else {
-      switch (args.getArg(0, -1)) {
+      switch (mode) {
         case 2: //Keyboard Action Mode (AM)
           setModeEnabled(TerminalMode.KeyboardAction, enabled);
           return true;
